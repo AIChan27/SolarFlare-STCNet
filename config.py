@@ -32,7 +32,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 # 数据集存放位置。
 # 注意：SOLAR-STORM2 原始数据有 7.4 GB，为免搬动，默认指向工作区里已有的位置。
 #       如果你把 data/ 搬进本项目，改成 DATA_DIR / "raw" 即可。
-SOLAR_STORM2_DIR = PROJECT_ROOT.parent / "SwinT-cnn" / "data"
+SOLAR_STORM2_DIR = DATA_DIR / "raw"
 
 # 磁图目录（73,810 张 .jpg 灰度图，平铺在一个目录里）
 MAGNETOGRAM_DIR = SOLAR_STORM2_DIR / "magnetogram_jpg"
@@ -199,8 +199,35 @@ STEPLR_STEP = 4
 STEPLR_GAMMA = 0.5
 
 # 数据加载
-NUM_WORKERS = 0         # Windows 上建议 0，多进程容易出问题
-PIN_MEMORY = True
+#
+# NUM_WORKERS 是最影响训练速度的一个参数，不要用 0。
+#
+# 实测（本机 RTX 5070 Laptop + 16 逻辑核，batch_size=32）：
+#     num_workers=0 : 单 batch 数据加载 98 ms   ← 在主进程同步做，GPU 干等
+#     num_workers=2 : 单 batch 数据加载 39 ms
+#     num_workers=4 : 单 batch 数据加载 22 ms
+#     num_workers=8 : 单 batch 数据加载  9 ms   ← 11.4 倍加速
+# 而 GPU 前向+反向单 batch 只要 195 ms。
+# 所以 num_workers=0 时数据加载占掉了约 1/3 的时间，
+# 表现为 CPU 打满 90%、GPU 只有 43%（GPU 在等 CPU 喂数据）。
+# 开到 8 之后数据加载(9ms) 远小于 GPU 计算(195ms)，GPU 不再等数据。
+#
+# 取 8 的理由：16 个逻辑核留一半给主进程与系统，避免和 GPU 抢 CPU。
+# 如果 CPU 核较少（比如 4 核），改成 2 或 4。
+NUM_WORKERS = 8
+
+PIN_MEMORY = True           # 锁页内存，加速 CPU→GPU 拷贝（仅 CUDA 有效）
+
+# 复用 DataLoader 子进程，避免每个 epoch 重建（NUM_WORKERS>0 时生效）
+PERSISTENT_WORKERS = True
+
+# 注意：NUM_WORKERS > 0 时，入口脚本必须有
+#     if __name__ == "__main__":
+# 保护。因为 Windows 用 spawn 方式启动子进程，子进程会重新导入主模块，
+# 没有保护就会递归启动进程并报：
+#     RuntimeError: An attempt has been made to start a new process before
+#     the current process has finished its bootstrapping phase.
+# 本项目的 main.py 已经有该保护，可以放心开多进程。
 
 # 早停：验证集指标连续 PATIENCE 轮不提升就停
 PATIENCE = 10

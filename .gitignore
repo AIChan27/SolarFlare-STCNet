@@ -36,6 +36,7 @@ ENV/
 # SOLAR-STORM2 原始数据 7.4 GB
 data/
 !data/.gitkeep
+!src/data/
 
 # 预训练权重，单个 109 MB / 336 MB
 pretrained/
@@ -46,7 +47,7 @@ pretrained/
 # ============================================================
 experiments/logs/
 experiments/checkpoints/
-experiments/figures/
+!experiments/figures/
 experiments/reports/
 
 # 但保留目录结构

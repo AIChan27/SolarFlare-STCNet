@@ -53,30 +53,43 @@ class CNN(nn.Module):
     """
     处理 10 个磁场特征参数的一维卷积网络（论文 3.1 节第二部分）。
 
-    结构：
-        Conv1d(1  → 16, kernel=1) + BN + ReLU
-        Conv1d(16 → 32, kernel=1) + BN + ReLU
+    结构（对应论文 3.3 节："卷积层使用大小为 3 的卷积核, 分别具有 16 个和
+    32 个输出通道, 后跟批归一化(BatchNorm)加速网络的收敛并提高模型的性能,
+    以及用于增强模型非线性能力的 ReLU 激活函数"）：
+        Conv1d(1  → 16, kernel=3, stride=1, padding=1) + BN + ReLU
+        Conv1d(16 → 32, kernel=3, stride=1, padding=1) + BN + ReLU
         Flatten  → Linear(32*10=320 → 320)
 
-    为什么用 1×1 卷积：
-        输入是 10 个标量参数排成的一维序列（长度 10、通道 1），
-        1×1 卷积等价于在每个参数位置上做一次全连接 + 非线性，
-        可以学到参数之间的组合关系，同时保持输出长度仍为 10，
-        最后 flatten 成 32×10=320 维特征。
+    为什么 kernel=3 要配 padding=1
+    ------------------------------
+    一维卷积的输出长度公式：
+        L_out = ⌊(L_in + 2*padding − kernel_size) / stride⌋ + 1
+    代入 L_in = 10、kernel_size = 3、stride = 1：
+        padding=0 → L_out = 8   长度变了，flatten 变成 256，fc 必须跟着改
+        padding=1 → L_out = 10  长度不变，flatten 仍是 320，与 fc(32*10, 320) 匹配
+    论文只说了 kernel=3，没提 padding。为了让"10 个参数进 → 10 个位置出"
+    这个语义成立（并保持 320 维特征不变），padding 取 1。
 
-    输入输出形状（重要）：
+    为什么用 kernel=3 而不是 1×1
+    ---------------------------
+    kernel=3 使每个输出位置能看到相邻 3 个参数，显式建模参数之间的局部组合
+    关系（例如 TOTUSJH 与 TOTUSJZ 这类同源参数之间的关联）；
+    1×1 卷积只能在每个参数位置上各自独立变换，看不到邻域。
+
+    输入输出形状（重要）
+    ------------------
         输入  x : (B, 1, 10)   ← 必须是 3 维！Conv1d 只接受 2D 或 3D 输入
         输出    : (B, 320)
     """
 
     def __init__(self):
         super(CNN, self).__init__()
-        # 通道数 1 → 16，卷积核 1×1，不改变序列长度
-        self.conv1 = nn.Conv1d(in_channels=1, out_channels=16, kernel_size=1)
+        # 通道数 1 → 16，卷积核大小 3（论文 3.3 节），padding=1 保持序列长度 10
+        self.conv1 = nn.Conv1d(in_channels=1, out_channels=16, kernel_size=3, stride=1, padding=1)
         self.bn1 = nn.BatchNorm1d(16)
         self.relu = nn.ReLU()
-        # 通道数 16 → 32
-        self.conv2 = nn.Conv1d(in_channels=16, out_channels=32, kernel_size=1)
+        # 通道数 16 → 32，同样 kernel=3, padding=1，长度仍为 10
+        self.conv2 = nn.Conv1d(in_channels=16, out_channels=32, kernel_size=3, stride=1, padding=1)
         self.bn2 = nn.BatchNorm1d(32)
         # 展平后是 32 通道 × 长度 10 = 320 维，映射到 320 维特征
         self.fc = nn.Linear(32 * 10, 320)
