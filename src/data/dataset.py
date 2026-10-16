@@ -321,6 +321,7 @@ def get_dataloaders(
     use_augment: bool = True,
     use_weighted_sampler: bool = True,
     max_train_samples: int | None = None,
+    worker_init_fn=None,                    # ★ 新增：DataLoader 子进程初始化函数
 ) -> dict:
     """
     构造 train / val / test 三个 DataLoader。
@@ -337,6 +338,9 @@ def get_dataloaders(
         训练集是否用加权采样。
     max_train_samples : int | None
         只取训练集的前 N 条（冒烟测试用，正式训练传 None）。
+    worker_init_fn : callable | None
+        传给 DataLoader 的子进程初始化函数，用于固定每个 worker 的随机种子。
+        传 None 时每个 worker 的随机状态由系统决定（不可复现）。
 
     Returns
     -------
@@ -400,6 +404,7 @@ def get_dataloaders(
             pin_memory=PIN_MEMORY,
             persistent_workers=pw,
             drop_last=False,
+            worker_init_fn=worker_init_fn,      # ★ 新增
         )
     else:
         train_loader = DataLoader(
@@ -409,6 +414,7 @@ def get_dataloaders(
             num_workers=num_workers,
             pin_memory=PIN_MEMORY,
             persistent_workers=pw,
+            worker_init_fn=worker_init_fn,      # ★ 新增
         )
 
     # ---------- 4. val/test：不 shuffle、不采样 ----------
@@ -419,6 +425,7 @@ def get_dataloaders(
                 val_ds, batch_size=batch_size, shuffle=False,
                 num_workers=num_workers, pin_memory=PIN_MEMORY,
                 persistent_workers=pw,
+                worker_init_fn=worker_init_fn,      # ★ 新增
             )
             if val_ds is not None
             else None
@@ -427,6 +434,7 @@ def get_dataloaders(
             test_ds, batch_size=batch_size, shuffle=False,
             num_workers=num_workers, pin_memory=PIN_MEMORY,
             persistent_workers=pw,
+            worker_init_fn=worker_init_fn,          # ★ 新增
         ),
     }
 

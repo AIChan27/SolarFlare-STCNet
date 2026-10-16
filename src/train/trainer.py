@@ -63,6 +63,38 @@ def set_seed(seed: int):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+def set_worker_seed(worker_id: int):
+    """
+    为 DataLoader 的每个子进程设置独立但可复现的随机种子。
+
+    为什么需要这个函数
+    ------------------
+    num_workers > 0 时，数据加载（含 RandomResizedCrop、RandomHorizontalFlip
+    等数据增强）发生在【子进程】里，而子进程不会继承主进程的随机状态。
+    如果不处理，每个 worker 的随机序列由操作系统决定，导致：
+        - 同一个 seed 跑两次，数据增强结果不同 → 结果不可复现
+        - 多种子实验的"种子差异"里混进了"worker 随机性"，方差被高估
+
+    做法：把主进程的 seed 和 worker_id 组合，保证
+        同一次运行内各 worker 不同（避免增强撞车），
+        不同运行间同种子可复现（满足实验要求）。
+
+    Parameters
+    ----------
+    worker_id : int
+        PyTorch 自动传入的 worker 编号（0, 1, 2, ...）。
+    """
+    import numpy as _np
+    import random as _random
+    import torch as _torch
+
+    # 取主进程当前的种子（set_seed 已设过），与 worker_id 组合
+    base_seed = _torch.initial_seed()
+    worker_seed = (base_seed + worker_id) % (2 ** 32)
+
+    _random.seed(worker_seed)
+    _np.random.seed(worker_seed)
+    _torch.manual_seed(worker_seed)
 
 def get_device(prefer=None) -> torch.device:
     """

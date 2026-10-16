@@ -183,17 +183,32 @@ def cmd_train(args):
     if args.no_weighted_sampler:
         cfg.use_weighted_sampler = False
 
+    # ★ 新增：覆盖随机种子
+    if getattr(args, "seed", None) is not None:
+        cfg.seed = args.seed
+
     tag = args.tag or "stcnet"
+    # ★ 新增：指定了 seed 就自动拼到 tag 后，保证每个种子的产物互不覆盖
+    #    例如 --tag stcnet --seed 1  →  tag = "stcnet_seed1"
+    #         → checkpoints/stcnet_seed1_best.pth, logs/stcnet_seed1_history.csv
+    if getattr(args, "seed", None) is not None:
+        tag = f"{tag}_seed{args.seed}"
 
     print("=" * 70)
     print(f"训练配置: {cfg}")
     print(f"实验标签: {tag}")
+    print(f"随机种子: {cfg.seed}")          # ★ 新增一行，便于日志核对
     print("=" * 70)
 
     # ---------- 2. 随机种子与设备 ----------
     set_seed(cfg.seed)
     device = get_device(cfg.device)
     print(f"设备: {device}")
+
+    # ★ 新增：DataLoader 子进程的种子函数（保证数据增强也可复现）
+    from functools import partial
+    from src.train.trainer import set_seed, get_device, train, set_worker_seed
+    worker_init_fn = partial(set_worker_seed)
 
     # ---------- 3. 数据 ----------
     if not Path(config.TRAIN_CSV).exists():
@@ -208,6 +223,7 @@ def cmd_train(args):
         use_weighted_sampler=cfg.use_weighted_sampler,
         # 冒烟测试时截断训练集
         max_train_samples=(200 if args.smoke else None),
+        worker_init_fn=worker_init_fn,          # ★ 新增
     )
 
     if args.smoke:
@@ -279,7 +295,20 @@ def cmd_test(args):
     from torch.utils.data import DataLoader
 
     cfg = Config()
+
+    # ★ 新增：覆盖随机种子
+    if getattr(args, "seed", None) is not None:
+        cfg.seed = args.seed
+
     tag = args.tag or "stcnet"
+    # ★ 新增：指定了 seed 就自动拼到 tag 后，保证每个种子的产物互不覆盖
+    #    例如 --tag stcnet --seed 1  →  tag = "stcnet_seed1"
+    #         → checkpoints/stcnet_seed1_best.pth, logs/stcnet_seed1_history.csv
+    if getattr(args, "seed", None) is not None:
+        tag = f"{tag}_seed{args.seed}"
+
+    print(f"实验标签: {tag}")    # 建议加上这行，方便核对
+
     device = get_device(cfg.device)
 
     # ---------- 1. 找权重 ----------
@@ -423,18 +452,26 @@ def build_parser():
     p_train.add_argument("--no-pretrain", action="store_true", help="不加载预训练权重（消融实验）")
     p_train.add_argument("--no-weighted-sampler", action="store_true", help="关闭加权采样")
     p_train.add_argument("--smoke", action="store_true", help="冒烟测试：小样本 1 个 epoch")
+    # ★ 新增：随机种子，用于多种子重复实验
+    p_train.add_argument("--seed", type=int, default=None,
+                         help="随机种子。不填则用 config.RANDOM_SEED；"
+                              "填了会自动把 seed 拼到 tag 后（如 stcnet_seed1），避免覆盖已有结果")
 
     # test
     p_test = sub.add_parser("test", help="阶段三：测试集评估")
     p_test.add_argument("--ckpt", type=str, default=None, help="权重文件路径")
     p_test.add_argument("--tag", type=str, default=None, help="实验标签")
     p_test.add_argument("--sweep", action="store_true", help="额外做阈值扫描")
+    p_test.add_argument("--seed", type=int, default=None, help="随机种子（用于定位对应权重）")
 
     # all
     p_all = sub.add_parser("all", help="一条龙：build-data → train → test")
     p_all.add_argument("--epochs", type=int, default=None, help="epoch 数")
     p_all.add_argument("--batch-size", type=int, default=None, help="batch 大小")
     p_all.add_argument("--tag", type=str, default=None, help="实验标签")
+    # ★ 新增
+    p_all.add_argument("--seed", type=int, default=None, help="随机种子")
+
     p_all.add_argument("--no-downsample", action="store_true", help="不对负样本下采样")
     p_all.add_argument("--no-supcon", action="store_true", help="关闭对比学习")
     p_all.add_argument("--no-pretrain", action="store_true", help="不加载预训练权重")
