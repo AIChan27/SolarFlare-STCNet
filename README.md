@@ -166,8 +166,8 @@ python scripts\check_env.py
 > - **Tesla P40 / 其他 Pascal 卡**：必须用 **cu121 或 cu124**（CUDA 13 已不支持 Pascal）
 > - RTX 30/40/50 系：可以用更新的 cu126/cu128
 >
-> 完整的磁盘预算、常见报错排查、驱动要不要更新，
-> 见 [docs/notes/run_on_p40.md](docs/notes/run_on_p40.md) 第二、七节。
+> 完整的磁盘预算、常见报错排查、驱动要不要更新、结果怎么带回来，
+> 见 [docs/notes/run_on_p40.md](docs/notes/run_on_p40.md) 第二、七、十节。
 
 本机开发环境（仅作参考，**不是要求**）：
 Python 3.12.14 / PyTorch 2.14.1+cu132 / torchvision 0.29.1 / RTX 5070 Laptop 12 GB。

@@ -6,6 +6,16 @@
 >
 > 文档日期：2026-10-17
 
+**不想通读的话，按这个顺序看：**
+
+| 你的处境 | 看哪节 |
+|---|---|
+| 刚拿到机器，准备建环境 | **二**（建环境）→ 遇到显卡问题看 **一**、**七** |
+| 环境报错 / GPU 不可用 | **一**（CUDA 与 torch 版本）、**二.4**（排查） |
+| 准备跑训练 | **三**（别加 `--amp`）、**四**（时间）、**八**（命令清单） |
+| 正在跑，想知道参数 | **九**（基准线配置） |
+| 跑完了，要把结果带回来 / 配 git | **十**（结果交接与 git 凭据） |
+
 ---
 
 ## 一、🔴 最严重的坑：**CUDA 13 不支持 Pascal，本地 torch 版本在 P40 上跑不起来**
@@ -508,3 +518,188 @@ tail -f experiments/logs/multiseed_jwfd.log
    但**两者不可比**（数据集、特征体系、划分方式、数据版本全不同；
    且本项目用的是更严格的**活动区级划分**，测试集活动区模型完全没见过）
 4. **阈值必须靠验证集选**：模型输出概率对固定 0.5 阈值不友好（不加权时 TPR 仅 0.014）
+
+---
+
+## 十、结果交接与 git 凭据
+
+> 这一节回答两个"到了学校一定会遇到"的问题：
+> ① 服务器怎么从 GitHub 拉代码，会不会要登录你的账号？
+> ② 在 P40 上训出来的权重，能不能直接拿到自己电脑上用？
+
+### 10.1 git pull 不需要登录，push 一定需要
+
+| 操作 | 需要认证吗 | 说明 |
+|---|---|---|
+| `git clone` / `git pull`（**公开**仓库） | ❌ **不需要** | 匿名 HTTPS 读取即可 |
+| `git push` | ✅ **永远需要** | 写操作必须证明身份，**公开仓库也一样** |
+
+所以服务器上直接这样就行，**不用配任何账号**：
+
+```powershell
+git clone https://github.com/AIChan27/SolarFlare-STCNet.git
+# 之后更新
+git pull
+```
+
+> ⚠️ 如果哪天把仓库改成 **private**，匿名拉取会失效，服务器上就不得不配凭据了。
+
+### 10.2 想推代码的三个方案
+
+#### 方案 A：服务器只读，回本地提交（★ 推荐）
+
+理由很实际：**权重本来就不进 git**（`experiments/checkpoints/` 在 `.gitignore` 里），
+跑完真正需要带回来的只有几 MB 的小文件（见 10.3）。从服务器拷回来、在自己电脑上提交即可，
+**服务器上零凭据风险**，提交历史也留在自己账号下。
+
+#### 方案 B：部署密钥 Deploy Key（想让服务器直接 push 时用）
+
+这是**唯一"不暴露账号凭据"又能推送**的办法。它是一对**只属于这一个仓库**的 SSH 密钥，
+可以随时在 GitHub 上撤销，**不能访问你的其他仓库或账号**。
+
+```powershell
+# ① 在服务器上生成专用密钥（不要设密码，一路回车）
+ssh-keygen -t ed25519 -C "p40-server" -f $env:USERPROFILE\.ssh\github_p40
+
+# ② 打印公钥
+Get-Content $env:USERPROFILE\.ssh\github_p40.pub
+```
+
+然后到 GitHub 网页：
+
+```
+仓库页 → Settings → Deploy keys → Add deploy key
+    Title: p40-server
+    Key:   （粘贴上面打印的公钥）
+    [✓] Allow write access       ← 勾上才能 push；不勾就是只读
+```
+
+再让 git 用这把钥匙：
+
+```powershell
+# 编辑 C:\Users\<用户名>\.ssh\config （没有就新建）
+# 内容：
+#   Host github.com
+#     HostName github.com
+#     User git
+#     IdentityFile ~/.ssh/github_p40
+
+# 远程地址换成 SSH
+git remote set-url origin git@github.com:AIChan27/SolarFlare-STCNet.git
+
+# 测试：成功时显示的是【仓库名】而不是你的用户名 —— 这正是部署密钥的特点
+ssh -T git@github.com
+# Hi AIChan27/SolarFlare-STCNet! You've successfully authenticated, but GitHub does not provide shell access.
+```
+
+#### 方案 C：Personal Access Token（**不推荐**）
+
+能用，但 token 等同于**账号凭据**（能访问你所有仓库）。留在共享的服务器上，
+导师或别人用那台机器时可能被读到。**除非确实需要，否则别用。**
+
+### 10.3 跑完要带回来什么
+
+| 内容 | 路径 | 体积 | 必要性 |
+|---|---|---|---|
+| 每轮训练曲线 | `experiments/logs/*_history.csv` | 每个 1–2 KB | ✅ **必须** |
+| 测试指标 | `experiments/reports/*_metrics.json` | 每个 < 1 KB | ✅ **必须** |
+| 多种子汇总 | `experiments/reports/*_seed_summary.md` | < 1 KB | ✅ **必须** |
+| 结果图 | `experiments/figures/*.png` | 每个 30–460 KB | ✅ 强烈建议 |
+| **最优权重** | `experiments/checkpoints/*_best.pth` | **每个 106 MB** | 🟡 可选（见 10.4） |
+| 完整日志 | `experiments/logs/multiseed_*.log` | 10–20 KB | 🟡 建议 |
+
+**小文件合计约 5 MB**，用 `scp` / U 盘 / 网盘都很轻松。
+
+```powershell
+# 在你电脑上执行（示例，把服务器结果拉回本地）
+scp -r <用户名>@<服务器IP>:".../SolarFlare-STCNet/experiments/logs"    .\experiments\
+scp -r <用户名>@<服务器IP>:".../SolarFlare-STCNet/experiments/reports" .\experiments\
+scp -r <用户名>@<服务器IP>:".../SolarFlare-STCNet/experiments/figures" .\experiments\
+```
+
+### 10.4 P40 上训的权重，能在自己电脑上用吗？
+
+**能，而且完全兼容。** 理由有三层：
+
+**① AMP 只影响"计算精度"，不影响"保存格式"**
+
+| 环节 | AMP 训练时 | 保存到 .pth |
+|---|---|---|
+| 前向/反向计算 | 用 bf16/fp16 算 | — |
+| **主权重（master weights）** | **始终是 fp32** | ✅ 存的就是这份 fp32 |
+
+所以 FP32 训练和 AMP 训练存出来的权重**格式完全一样**。
+
+**② 实测确认（本地权重）**
+
+```
+张量个数         : 203
+dtype 分布       : {torch.float32: 189, torch.int64: 14}
+保存时的 device  : {cpu: 203}
+参数量合计       : 27,861,482
+```
+
+那 14 个 `int64` 是 BatchNorm 的 `num_batches_tracked` 计数器，属正常内容。
+
+**③ 设备差异自动处理**
+
+`main.py` 加载时用：
+
+```python
+state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+```
+
+`map_location="cpu"` 会把**任何设备上保存的权重**重映射到 CPU，再加载到当前 GPU。
+所以 P40 → 5070、5070 → P40，双向都能直接加载。
+
+#### 真正需要匹配的（与 AMP 无关）
+
+| 必须一致 | 本项目情况 |
+|---|---|
+| 模型结构配置 | `SWIN_VARIANT`（tiny）/ `NUM_PARAMS=29` / `cnn_feature_dim=320` |
+| 代码版本 | `src/models/` 的定义一致（同一份 git 代码即可） |
+| torch 大版本 | 都是 2.x 即可；存的纯张量，跨版本也能读 |
+
+#### 拷回来后的验证
+
+```powershell
+python main.py test --tag jwfd --seed 1 --val-threshold
+```
+
+对比输出的 TSS/AUC 与服务器记录值：**应该基本一致**，最多相差第 4 位小数
+（浮点累加顺序不同）。若差得很多，说明权重拷坏了。
+
+#### 如果想"接着训练"
+
+技术上没问题（权重是 fp32）。但这属于**改变实验设定** ——
+例：P40 上 FP32 训 3 轮，再在本机用 AMP 续训 3 轮。
+这种"精度切换 + 跨机器续训"必须在实验记录里写明，否则结果不可解释。
+
+### 10.5 出发前 / 回来后的检查清单
+
+**去之前（本地）**
+
+- [ ] `git pull` 确认代码是最新的
+- [ ] `python scripts\check_env.py` 本地全绿（确认代码没坏）
+- [ ] 准备好数据拷贝（`data/index/*.csv` + `data/raw/png_600_Th1000/` + `pretrained/swin_*.pth`）
+- [ ] 准备一个 U 盘或网盘目录，用来往回带结果
+
+**在服务器上**
+
+- [ ] `nvidia-smi` 看 CUDA Version（≥12.1 就别动驱动）
+- [ ] `git clone`（公开仓库，不用登录）
+- [ ] 按第二节建环境
+- [ ] `python scripts\check_env.py` 显示 `GPU：可用 [OK]`
+- [ ] 拷数据
+- [ ] `python main.py check` + `check-data`
+- [ ] 探针 1 个 epoch 量速度
+- [ ] 正式 5 种子（**不加 `--amp`**）
+- [ ] `powercfg /change standby-timeout-ac 0` 防止睡眠
+
+**回来之后**
+
+- [ ] 拷回 10.3 里的小文件
+- [ ] 拷回 1 个最优权重（可选）
+- [ ] 用 `python main.py test --tag ... --val-threshold` 验证权重可加载
+- [ ] **在自己电脑上** `git add` / `commit` / `push`
+
