@@ -144,15 +144,30 @@ python scripts\check_env.py          # 只检测，不安装任何东西
 缺包时手动安装：
 
 ```powershell
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install numpy pandas scikit-learn matplotlib pillow
+pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install --no-cache-dir numpy pandas scikit-learn matplotlib pillow
 ```
 
+**从零建一个干净环境**（推荐做法，约 **3.5 GB**）：
+
+```powershell
+conda create -n jwfd python=3.12 -y
+conda activate jwfd
+pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install --no-cache-dir numpy pandas scikit-learn matplotlib pillow
+python scripts\check_env.py
+```
+
+> **为什么用 pip 而不是 `conda install pytorch`**：pip 装约 3.5 GB，
+> conda 会把 `cudatoolkit`/`cudnn`/`mkl` 再装一份，变成 5–8 GB。
+> **`--no-cache-dir`** 能省下约 2 GB 的 wheel 缓存（torch wheel 单个就 1.9 GB）。
+>
 > **CUDA 版本怎么选**：用 `nvidia-smi` 看右上角 `CUDA Version`。
 > - **Tesla P40 / 其他 Pascal 卡**：必须用 **cu121 或 cu124**（CUDA 13 已不支持 Pascal）
 > - RTX 30/40/50 系：可以用更新的 cu126/cu128
 >
-> 详见 [docs/notes/run_on_p40.md](docs/notes/run_on_p40.md)。
+> 完整的磁盘预算、常见报错排查、驱动要不要更新，
+> 见 [docs/notes/run_on_p40.md](docs/notes/run_on_p40.md) 第二、七节。
 
 本机开发环境（仅作参考，**不是要求**）：
 Python 3.12.14 / PyTorch 2.14.1+cu132 / torchvision 0.29.1 / RTX 5070 Laptop 12 GB。
