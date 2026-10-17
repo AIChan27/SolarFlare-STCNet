@@ -43,70 +43,7 @@ import torch.nn.functional as F
 # 从 swin.py 导入全部内容（含 nn / F 等），保持与官方实现一致的写法
 from src.models.swin import *          # noqa: F401,F403
 
-
-# ============================================================
-# 磁场参数分支：1D-CNN
-# ============================================================
-
-
-class CNN(nn.Module):
-    """
-    处理 10 个磁场特征参数的一维卷积网络（论文 3.1 节第二部分）。
-
-    结构（对应论文 3.3 节："卷积层使用大小为 3 的卷积核, 分别具有 16 个和
-    32 个输出通道, 后跟批归一化(BatchNorm)加速网络的收敛并提高模型的性能,
-    以及用于增强模型非线性能力的 ReLU 激活函数"）：
-        Conv1d(1  → 16, kernel=3, stride=1, padding=1) + BN + ReLU
-        Conv1d(16 → 32, kernel=3, stride=1, padding=1) + BN + ReLU
-        Flatten  → Linear(32*10=320 → 320)
-
-    为什么 kernel=3 要配 padding=1
-    ------------------------------
-    一维卷积的输出长度公式：
-        L_out = ⌊(L_in + 2*padding − kernel_size) / stride⌋ + 1
-    代入 L_in = 10、kernel_size = 3、stride = 1：
-        padding=0 → L_out = 8   长度变了，flatten 变成 256，fc 必须跟着改
-        padding=1 → L_out = 10  长度不变，flatten 仍是 320，与 fc(32*10, 320) 匹配
-    论文只说了 kernel=3，没提 padding。为了让"10 个参数进 → 10 个位置出"
-    这个语义成立（并保持 320 维特征不变），padding 取 1。
-
-    为什么用 kernel=3 而不是 1×1
-    ---------------------------
-    kernel=3 使每个输出位置能看到相邻 3 个参数，显式建模参数之间的局部组合
-    关系（例如 TOTUSJH 与 TOTUSJZ 这类同源参数之间的关联）；
-    1×1 卷积只能在每个参数位置上各自独立变换，看不到邻域。
-
-    输入输出形状（重要）
-    ------------------
-        输入  x : (B, 1, 10)   ← 必须是 3 维！Conv1d 只接受 2D 或 3D 输入
-        输出    : (B, 320)
-    """
-
-    def __init__(self):
-        super(CNN, self).__init__()
-        # 通道数 1 → 16，卷积核大小 3（论文 3.3 节），padding=1 保持序列长度 10
-        self.conv1 = nn.Conv1d(in_channels=1, out_channels=16, kernel_size=3, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm1d(16)
-        self.relu = nn.ReLU()
-        # 通道数 16 → 32，同样 kernel=3, padding=1，长度仍为 10
-        self.conv2 = nn.Conv1d(in_channels=16, out_channels=32, kernel_size=3, stride=1, padding=1)
-        self.bn2 = nn.BatchNorm1d(32)
-        # 展平后是 32 通道 × 长度 10 = 320 维，映射到 320 维特征
-        self.fc = nn.Linear(32 * 10, 320)
-
-    def forward(self, x):
-        # x 的期望形状：(B, 1, 10)
-        # 原代码在这里写了 x.squeeze(2)，那是想压掉一个多余维度，
-        # 但原 dataset 产出的是 (B,1,10,1)，squeeze(2) 压的是"长度 10"那一维
-        # （squeeze 只在维度大小为 1 时才生效），所以压不掉，直接崩：
-        #   RuntimeError: Expected 2D (unbatched) or 3D (batched) input to conv1d,
-        #                 but got input of size: [B, 1, 10, 1]
-        # 现在 src/data/dataset.py 保证输入就是 (B,1,10)，不需要 squeeze。
-        x = self.relu(self.bn1(self.conv1(x)))
-        x = self.relu(self.bn2(self.conv2(x)))
-        x = x.view(x.size(0), -1)      # (B, 32, 10) → (B, 320)
-        x = self.fc(x)                 # (B, 320)
-        return x
+from src.models.cnn import CNN
 
 
 # ============================================================
@@ -163,7 +100,13 @@ class Mynet(nn.Module):
             self.load_pretrained(pretrained_path)
 
         # ---------- 第二部分：磁场参数 1D-CNN 分支 ----------
-        self.text_cnn = CNN()
+        # 特征个数从 config.num_params 取，不能写死：
+        #   SOLAR-STORM2 → 10 个 SHARP 参数
+        #   JW-FD        → 29 个磁场特征（梯度7 + 中性线13 + 小波5 + 磁通量4）
+        # 传入后会决定 CNN.fc 的输入维度（32*num_params）
+        num_params = getattr(config, "num_params", 10)
+        cnn_out_dim = getattr(config, "cnn_feature_dim", 320)
+        self.text_cnn = CNN(num_params=num_params, out_dim=cnn_out_dim)
 
         # ---------- 第三部分：分类网络 ----------
         # 两个模态特征拼接后长度 = swin_feature_dim + cnn_feature_dim
@@ -292,100 +235,6 @@ class Mynet(nn.Module):
 
         # 返回图像特征和分类概率（图像特征给 SupConLoss 用）
         return img, logits
-
-
-# ============================================================
-# SupConLoss：有监督对比损失
-# ============================================================
-
-
-class SupConLoss(nn.Module):
-    """
-    Supervised Contrastive Learning Loss（Khosla et al., 2020）。
-
-    作用：让同一类别的样本在特征空间里互相靠近，不同类别的样本互相远离。
-         对太阳耀斑这种正负极不平衡的任务，能让少数类（耀斑）的特征更紧凑，
-         从而提升 TSS。
-
-    Parameters
-    ----------
-    temperature : float
-        温度系数，越小越"尖锐"。默认 0.1。
-    scale_by_temperature : bool
-        是否把 loss 乘回温度系数。默认 True。
-
-    输入
-    ----
-    features : (B, D) 特征向量（本模型传入的是图像模态特征）
-    labels   : (B,)   标签
-
-    输出
-    ----
-    loss : 标量
-    """
-
-    def __init__(self, temperature=0.1, scale_by_temperature=True):
-        super(SupConLoss, self).__init__()
-        self.temperature = temperature
-        self.scale_by_temperature = scale_by_temperature
-
-    def forward(self, features, labels=None, mask=None):
-        device = torch.device("cuda") if features.is_cuda else torch.device("cpu")
-
-        # L2 归一化，使点积等价于余弦相似度
-        features = F.normalize(features, p=2, dim=1)
-        batch_size = features.shape[0]
-
-        # ---------- 构造 mask ----------
-        # labels 和 mask 不能同时给
-        if labels is not None and mask is not None:
-            raise ValueError("Cannot define both `labels` and `mask`")
-        elif labels is None and mask is None:
-            # 无监督：只有自己和自己算同类
-            mask = torch.eye(batch_size, dtype=torch.float32).to(device)
-        elif labels is not None:
-            # 有监督：label 相同则为同类，mask[i][j] = 1
-            labels = labels.contiguous().view(-1, 1)
-            if labels.shape[0] != batch_size:
-                raise ValueError("Num of labels does not match num of features")
-            mask = torch.eq(labels, labels.T).float().to(device)
-        else:
-            mask = mask.float().to(device)
-
-        # ---------- 计算两两相似度 ----------
-        anchor_dot_contrast = torch.div(
-            torch.matmul(features, features.T), self.temperature
-        )
-        # 数值稳定性：每行减去最大值再取指数
-        logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
-        logits = anchor_dot_contrast - logits_max.detach()
-        exp_logits = torch.exp(logits)
-
-        # ---------- 正负样本掩码 ----------
-        # logits_mask 去掉对角线（自己和自己）
-        logits_mask = torch.ones_like(mask).to(device) - torch.eye(batch_size).to(device)
-        positives_mask = mask * logits_mask
-        negatives_mask = 1.0 - mask
-
-        num_positives_per_row = torch.sum(positives_mask, axis=1)
-
-        # 分母 = 所有非自身的 exp 之和
-        denominator = torch.sum(exp_logits * negatives_mask, axis=1, keepdims=True) + \
-                      torch.sum(exp_logits * positives_mask, axis=1, keepdims=True)
-
-        log_probs = logits - torch.log(denominator)
-        if torch.any(torch.isnan(log_probs)):
-            raise ValueError("Log_prob has nan!")
-
-        # 只在有正样本的行上求平均
-        log_probs = torch.sum(log_probs * positives_mask, axis=1)[num_positives_per_row > 0] / \
-                    num_positives_per_row[num_positives_per_row > 0]
-
-        loss = -log_probs
-        if self.scale_by_temperature:
-            loss *= self.temperature
-        return loss.mean()
-
 
 # ============================================================
 # 简单自测

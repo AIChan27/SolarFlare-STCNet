@@ -275,6 +275,87 @@ def sweep_thresholds(
     return results
 
 
+def select_threshold(
+    net,
+    loader,
+    device,
+    metric: str = "tss",
+    thresholds=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
+    verbose: bool = True,
+):
+    """
+    在【验证集】上扫描分类阈值并选出最优值。
+
+    ⚠️ 为什么必须用验证集，不能用测试集
+    ----------------------------------
+    阈值是一个"被选出来的超参数"。如果直接在测试集上扫阈值再挑最好的，
+    等价于用测试集的答案去挑一个对这批测试样本最有利的分割点 ——
+    这是典型的**测试集泄漏（test leakage）**，会让报告指标虚高。
+
+    实测过它的危害：在 SOLAR-STORM2 上，TSS 在阈值 0.4~0.7 之间摆动了 0.04，
+    而"虚高 0.04"比我们想验证的任何模型改进（0.01~0.02）都大。
+    也就是说，不修这个问题，后续所有"改进"结论都可能被污染。
+
+    正确流程：
+        1. 验证集上扫阈值 → 选出 t*
+        2. t* 固定下来
+        3. 用 t* 在测试集上**只评估一次** → 这个数字才能报告
+
+    Parameters
+    ----------
+    net : nn.Module
+    loader : DataLoader
+        【必须是验证集】。传测试集就是泄漏。
+    device : torch.device
+    metric : str
+        选阈值的判据，'tss'（默认，论文主指标）/ 'f1' / 'precision'。
+        注意：不建议用 'far' 或 'accuracy' 作为判据。
+    thresholds : tuple
+        候选阈值。
+    verbose : bool
+
+    Returns
+    -------
+    best_threshold : float
+        选出的最优阈值。
+    best_row : dict
+        该阈值下的指标（在验证集上）。
+    all_rows : list[dict]
+        全部阈值的扫描结果（便于画图/存盘）。
+    """
+    # 只推理一次，拿到全部概率后在各阈值上复用
+    results = sweep_thresholds(net, loader, device, thresholds=thresholds, verbose=False)
+
+    key = metric.lower()
+    if key not in ("tss", "f1", "precision", "accuracy", "tnr", "tpr"):
+        raise ValueError(
+            f"不支持的选阈值判据 {metric!r}；可选 tss / f1 / precision / accuracy / tnr / tpr"
+        )
+
+    best_row = max(results, key=lambda r: r[key])
+    best_threshold = float(best_row["threshold"])
+
+    if verbose:
+        print()
+        print("=" * 78)
+        print(f"验证集阈值选择（判据 = {key.upper()}）")
+        print("=" * 78)
+        print(f"{'阈值':>6} | {'TPR':>7} {'TNR':>7} {'Prec':>7} {'F1':>7} "
+              f"{'TSS':>7} {'FAR':>7} {'ACC':>7}")
+        print("-" * 78)
+        for r in results:
+            mark = "  ← 选中" if abs(r["threshold"] - best_threshold) < 1e-9 else ""
+            print(f"{r['threshold']:>6.2f} | {r['tpr']:>7.4f} {r['tnr']:>7.4f} "
+                  f"{r['precision']:>7.4f} {r['f1']:>7.4f} "
+                  f"{r['tss']:>7.4f} {r['far']:>7.4f} {r['accuracy']:>7.4f}{mark}")
+        print("-" * 78)
+        print(f"选中阈值 t* = {best_threshold:.2f}（验证集 {key.upper()} = {best_row[key]:.4f}）")
+        print("该阈值将固定用于测试集评估，测试集不再参与任何阈值搜索。")
+        print("=" * 78)
+
+    return best_threshold, best_row, results
+
+
 # ============================================================
 # 简单自测
 # ============================================================

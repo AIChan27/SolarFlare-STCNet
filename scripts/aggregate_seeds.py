@@ -104,7 +104,11 @@ def main():
 
     print()
     if len(seeds) < 3:
-        print("⚠️  建议至少 3 个种子（推荐 5 个）才能得到可靠的 std 估计。")
+        # ⚠️ 注意：这里不要用 emoji（如 ⚠️）。
+        # Windows 中文控制台默认编码是 GBK(cp936)，打印 emoji 会抛：
+        #     UnicodeEncodeError: 'gbk' codec can't encode character '\u26a0'
+        # 而且这个异常发生在写 markdown 之前，会导致汇总文件生成失败（2026-10-17 踩过）。
+        print("[提示] 建议至少 3 个种子（推荐 5 个）才能得到可靠的 std 估计。")
 
     # ---------- 可选输出 markdown ----------
     if args.out:

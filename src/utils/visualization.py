@@ -129,15 +129,19 @@ def plot_training_curves(history: dict, tag: str = "stcnet", out_dir: Path | Non
     ax.grid(alpha=0.3)
     ax.legend()
 
-    # ---------- 左下：TSS / F1 ----------
+    # ---------- 左下：AUC / TSS / F1 ----------
+    # AUC 是阈值无关指标，用它看"模型判别能力"；
+    # TSS/F1 依赖固定阈值（0.5），会更抖。两者一起看才好判断是"模型在进步"还是"阈值运气"。
     ax = axes[1][0]
+    if history.get("val_auc"):
+        ax.plot(epochs, history["val_auc"], "o-", ms=3, label="val AUC（阈值无关）")
     if history.get("val_tss"):
         ax.plot(epochs, history["val_tss"], "^-", ms=3, label="val TSS")
     if history.get("val_f1"):
         ax.plot(epochs, history["val_f1"], "v-", ms=3, label="val F1")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Score")
-    ax.set_title("Validation TSS / F1（TSS 是本任务最看重的指标）")
+    ax.set_title("Validation AUC / TSS / F1（AUC 不受阈值抖动影响）")
     ax.grid(alpha=0.3)
     ax.legend()
 

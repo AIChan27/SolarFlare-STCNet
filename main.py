@@ -4,14 +4,14 @@ main.py
 项目主入口，按阶段调用 pipeline
 
 用法（在项目根目录运行）：
-    python main.py check                     # 检查环境与数据是否就绪
-    python main.py build-data                # 阶段一：构建索引 CSV
-    python main.py build-data --no-downsample  # 构建但不对负样本下采样
+    python main.py check                     # 检查环境是否就绪、模型能否构建
+    python main.py check-data                # 校验 JW-FD 数据集（行数/列/标签/图片/划分）
+    python main.py check-data --sample 500   # 抽样更多图片做存在性检查
     python main.py train                     # 阶段二：训练
     python main.py train --smoke             # 冒烟测试（小样本 1 个 epoch）
     python main.py test --ckpt <权重路径>     # 阶段三：测试集评估
     python main.py test --sweep              # 评估 + 阈值扫描
-    python main.py all                       # 一条龙：build-data → train → test
+    python main.py all                       # 一条龙：check-data → train → test
 
 常用可选参数：
     --epochs N      覆盖 epoch 数
@@ -74,13 +74,13 @@ def cmd_check(args):
         except ImportError:
             print(f"    {mod:12s}: 缺失（请安装）")
 
-    # ---------- 2. 数据文件 ----------
-    print("\n[2] 数据文件")
+    # ---------- 2. 数据文件（JW-FD v1，10% 子集）----------
+    print("\n[2] 数据（JW-FD v1，约 10% 代表性子集）")
     paths = {
-        "磁图目录": config.MAGNETOGRAM_DIR,
-        "参数表": config.PARA_FLARE_TXT,
+        "JW-FD 根目录": config.JWFD_DIR,
+        "PNG 磁图目录": config.JWFD_PNG_DIR,
+        "耀斑事件表": config.JWFD_FLARE_LABELS,
         "Swin 预训练权重": config.SWIN_PRETRAINED,
-        "CNN 预训练权重": config.CNN_PRETRAINED,
     }
     all_ok = True
     for name, p in paths.items():
@@ -88,24 +88,33 @@ def cmd_check(args):
         all_ok &= ok
         print(f"    [{'OK ' if ok else '缺失'}] {name:16s} {p}")
 
-    # 磁图数量核对（官方全量应为 73810 张）
-    if Path(config.MAGNETOGRAM_DIR).exists():
-        n_jpg = sum(1 for _ in Path(config.MAGNETOGRAM_DIR).glob("*.jpg"))
-        flag = "OK " if n_jpg == 73810 else "注意"
-        print(f"    [{flag}] 磁图数量 {n_jpg} 张（官方全量为 73810 张）")
+    # 活动区数与 PNG 总数核对（10% 子集应为 307 个活动区 / 200,938 张）
+    if Path(config.JWFD_PNG_DIR).exists():
+        print("    ... 正在统计 PNG 数量（约需几秒）")
+        ar_dirs = [d for d in Path(config.JWFD_PNG_DIR).iterdir() if d.is_dir()]
+        n_png = sum(1 for _ in Path(config.JWFD_PNG_DIR).rglob("*.png"))
+        flag = "OK " if (len(ar_dirs) == 307 and n_png == 200938) else "注意"
+        print(f"    [{flag}] 活动区 {len(ar_dirs):,} 个，PNG {n_png:,} 张"
+              f"（10% 子集预期 307 / 200,938）")
 
-    # ---------- 3. 索引 CSV ----------
-    print("\n[3] 索引 CSV（阶段一产物）")
-    for name, p in [
-        ("训练集", config.TRAIN_CSV),
-        ("验证集", config.VAL_CSV),
-        ("测试集", config.TEST_CSV),
+    # ---------- 3. 数据集 CSV ----------
+    print("\n[3] 数据集 CSV（66 列；官方已按活动区 8:1:1 划分，无需自己切分）")
+    for name, p, expect in [
+        ("训练集", config.TRAIN_CSV, 158935),
+        ("验证集", config.VAL_CSV, 18262),
+        ("测试集", config.TEST_CSV, 23741),
     ]:
         if Path(p).exists():
-            n = sum(1 for _ in open(p, "r", encoding="utf-8"))
-            print(f"    [OK ] {name}: {n} 条  {p}")
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                n = sum(1 for _ in f) - 1          # 减去表头
+            flag = "OK " if n == expect else "注意"
+            print(f"    [{flag}] {name}: {n:>7,} 条（预期 {expect:,}）  {Path(p).name}")
         else:
-            print(f"    [缺失] {name}: 请先运行  python main.py build-data")
+            print(f"    [缺失] {name}: {p}")
+            all_ok = False
+
+    print(f"\n    主任务标签列 : {config.LABEL_COL}")
+    print(f"    特征维度     : {config.NUM_PARAMS}（config.FEATURE_COLS）")
 
     # ---------- 4. 模型能否构建 ----------
     print("\n[4] 模型构建自检")
@@ -116,10 +125,12 @@ def cmd_check(args):
         model = Mynet(cfg, pretrained_path=config.SWIN_PRETRAINED)
         n_param = sum(p.numel() for p in model.parameters())
 
-        # 用假输入跑一次前向
+        # 用假输入跑一次前向（特征维必须等于 config.NUM_PARAMS，不能写死 10）
         model.eval()
         with torch.no_grad():
-            _, probs = model((torch.randn(1, 1, 224, 224), torch.randn(1, 1, 10)))
+            _, probs = model(
+                (torch.randn(1, 1, 224, 224), torch.randn(1, 1, config.NUM_PARAMS))
+            )
 
         print(f"    [OK ] Mynet 构建成功，参数量 {n_param:,}")
         print(f"    [OK ] 前向输出形状 {tuple(probs.shape)}（期望 (1, 2)）")
@@ -136,18 +147,188 @@ def cmd_check(args):
 
 
 # ============================================================
-# 阶段一：构建数据索引
+# 数据完整性校验（替代原来的 build-data）
 # ============================================================
 
 
-def cmd_build_data(args):
+def cmd_validate_data(args):
     """
-    运行数据构建阶段：从 SOLAR-STORM2 原始数据生成三份索引 CSV。
-    """
-    from src.data.preprocess import run_preprocess_stage
+    校验 JW-FD 数据集是否可直接用于训练。
 
-    summary = run_preprocess_stage()
-    return 0 if summary["train"] > 0 else 1
+    为什么不再需要 build-data
+    -------------------------
+    SOLAR-STORM2 时代，需要我们自己"按时间切分 + 负样本下采样 + 生成三联 CSV"。
+    JW-FD 官方已经用 split_dataset.py 按**活动区**做了 8:1:1 分层划分（seed=62），
+    并直接提供了 train / val / test 三份 66 列 CSV。
+    所以我们只需**校验**，不再**构建**——src/data/preprocess.py 因此作废。
+
+    校验内容
+    --------
+        1. 三份 CSV 是否存在、行数是否与官方一致
+        2. 66 列是否齐全；config.FEATURE_COLS 是否全部命中；LABEL_COL 是否存在
+        3. 每个标签列的正样本数与缺失值
+        4. 抽样检查图片路径是否真实存在（默认 200 张）
+        5. 活动区级划分是否真的没有交叉（同一 AR 不跨 train/val/test）
+    """
+    import csv as _csv
+    import random as _random
+
+    print("=" * 76)
+    print("JW-FD 数据集校验")
+    print("=" * 76)
+    print(f"  JW-FD 版本: v1（约 10% 子集）")
+    print(f"  根目录    : {config.JWFD_DIR}")
+    print(f"  PNG 目录  : {config.JWFD_PNG_DIR}")
+    print(f"  主任务标签: {config.LABEL_COL}")
+    print()
+
+    # ---------- 1. 三份 CSV 行数 ----------
+    expect = {"train": 158935, "val": 18262, "test": 23741}
+    files = {"train": config.TRAIN_CSV, "val": config.VAL_CSV, "test": config.TEST_CSV}
+    headers: dict[str, list[str]] = {}
+    ok_all = True
+
+    print("[1] CSV 文件与行数")
+    for split, p in files.items():
+        if not Path(p).exists():
+            print(f"    [缺失] {split:5s}: {p}")
+            ok_all = False
+            continue
+        with open(p, "r", encoding="utf-8", errors="replace", newline="") as f:
+            rd = _csv.reader(f)
+            try:
+                hdr = next(rd)
+            except StopIteration:
+                print(f"    [空文件] {split}: {p}")
+                ok_all = False
+                continue
+            headers[split] = [h.strip() for h in hdr]
+            n = sum(1 for _ in rd)
+        flag = "OK  " if n == expect[split] else "注意"
+        print(f"    [{flag}] {split:5s}: {n:>7,} 行 / {len(headers[split])} 列"
+              f"（预期 {expect[split]:,} 行）")
+
+    # ---------- 2. 列完整性 ----------
+    print("\n[2] 列完整性检查")
+    if headers:
+        any_hdr = headers[next(iter(headers))]
+        missing_feat = [c for c in config.FEATURE_COLS if c not in any_hdr]
+        has_label = config.LABEL_COL in any_hdr
+        n_label_cols = sum(1 for c in any_hdr if c.startswith("flare_label_"))
+        n_class_cols = sum(1 for c in any_hdr if c.startswith("flare_class_"))
+
+        print(f"    总列数            : {len(any_hdr)}（论文口径 66）")
+        print(f"    二分类标签列数    : {n_label_cols}（预期 28 = 7 窗口 × 4 阈值）")
+        print(f"    类别标签列数      : {n_class_cols}（预期 7）")
+        print(f"    29 个特征列缺失   : {missing_feat if missing_feat else '无'}")
+        print(f"    主任务标签 {config.LABEL_COL}: {'存在' if has_label else '缺失'}")
+        if missing_feat or not has_label:
+            ok_all = False
+
+    # ---------- 3. 标签分布 ----------
+    print("\n[3] 标签分布（训练集）")
+    if "train" in headers:
+        hdr = headers["train"]
+        label_cols = [c for c in hdr if c.startswith("flare_label_")]
+        # 只统计主任务 + 几个常用标签，避免扫 28 遍
+        watch = [config.LABEL_COL] + [
+            c for c in ("flare_label_C1.0_24hr", "flare_label_M1.0_24hr",
+                        "flare_label_M5.0_48hr", "flare_label_X1.0_24hr")
+            if c in label_cols and c != config.LABEL_COL
+        ]
+        idxs = {c: hdr.index(c) for c in watch}
+        counts = {c: [0, 0] for c in watch}      # [负, 正]
+        with open(files["train"], "r", encoding="utf-8", errors="replace", newline="") as f:
+            rd = _csv.reader(f)
+            next(rd)
+            for row in rd:
+                for c, i in idxs.items():
+                    if i < len(row):
+                        v = row[i].strip()
+                        if v == "1":
+                            counts[c][1] += 1
+                        elif v == "0":
+                            counts[c][0] += 1
+        for c in watch:
+            neg, pos = counts[c]
+            tot = neg + pos
+            mark = "  ← 主任务" if c == config.LABEL_COL else ""
+            print(f"    {c:<26s} 正 {pos:>7,} / 负 {neg:>8,}"
+                  f"（正样本率 {pos / max(tot,1):>6.2%}）{mark}")
+
+    # ---------- 4. 抽样检查图片存在性 ----------
+    print("\n[4] 图片路径抽样检查")
+    if "train" in headers:
+        hdr = headers["train"]
+        i_path = hdr.index(config.COL_IMAGE_PATH) if config.COL_IMAGE_PATH in hdr else None
+        i_fn = hdr.index(config.COL_IMAGE_FILENAME) if config.COL_IMAGE_FILENAME in hdr else None
+        if i_path is not None or i_fn is not None:
+            from src.data.dataset import resolve_image_path
+            rows = []
+            with open(files["train"], "r", encoding="utf-8", errors="replace", newline="") as f:
+                rd = _csv.reader(f)
+                next(rd)
+                for k, row in enumerate(rd):
+                    if k >= 2000:
+                        break
+                    rows.append(row)
+            sample = _random.Random(0).sample(
+                rows, min(getattr(args, "sample", 200), len(rows))
+            )
+            miss, ok_n = [], 0
+            for row in sample:
+                rel = row[i_path] if i_path is not None and i_path < len(row) else ""
+                fn = row[i_fn] if i_fn is not None and i_fn < len(row) else None
+                p = resolve_image_path(rel, fn)
+                if Path(p).exists():
+                    ok_n += 1
+                elif len(miss) < 3:
+                    miss.append(p)
+            print(f"    抽样 {len(sample)} 张 → 存在 {ok_n}，缺失 {len(sample) - ok_n}")
+            for m in miss:
+                print(f"      缺失示例: {m}")
+            if ok_n < len(sample):
+                ok_all = False
+
+    # ---------- 5. 活动区划分交叉检查 ----------
+    print("\n[5] 活动区（AR）级划分交叉检查")
+    ar_sets: dict[str, set[str]] = {}
+    for split in ("train", "val", "test"):
+        if split not in headers or config.COL_IMAGE_FILENAME not in headers[split]:
+            continue
+        i_fn = headers[split].index(config.COL_IMAGE_FILENAME)
+        s: set[str] = set()
+        with open(files[split], "r", encoding="utf-8", errors="replace", newline="") as f:
+            rd = _csv.reader(f)
+            next(rd)
+            for row in rd:
+                if i_fn < len(row):
+                    ar = row[i_fn].split("_")[0]      # 'AR3947'
+                    s.add(ar)
+        ar_sets[split] = s
+        print(f"    {split:5s}: {len(s)} 个活动区")
+
+    if len(ar_sets) == 3:
+        overlaps = {
+            "train∩val": ar_sets["train"] & ar_sets["val"],
+            "train∩test": ar_sets["train"] & ar_sets["test"],
+            "val∩test": ar_sets["val"] & ar_sets["test"],
+        }
+        clean = all(len(v) == 0 for v in overlaps.values())
+        for k, v in overlaps.items():
+            print(f"    {k:<12s}: {len(v)} 个重叠"
+                  + (f"  ← 泄漏！{sorted(v)[:5]}" if v else "  ✓"))
+        if clean:
+            print("    ✓ 活动区级划分无交叉，不存在同一活动区跨分区的泄漏")
+        else:
+            ok_all = False
+
+    # ---------- 汇总 ----------
+    print()
+    print("=" * 76)
+    print("校验结论: " + ("全部通过，可以开始训练" if ok_all else "存在问题，请按上面的提示处理"))
+    print("=" * 76)
+    return 0 if ok_all else 1
 
 
 # ============================================================
@@ -183,6 +364,14 @@ def cmd_train(args):
     if args.no_weighted_sampler:
         cfg.use_weighted_sampler = False
 
+    # ★ 混合精度：--amp 启用；--amp-dtype 覆盖类型
+    if getattr(args, "amp", False):
+        cfg.use_amp = True
+    if getattr(args, "amp_dtype", None):
+        cfg.amp_dtype = args.amp_dtype
+    if cfg.use_amp:
+        print(f"[AMP] 混合精度已启用：dtype={cfg.amp_dtype}")
+
     # ★ 新增：覆盖随机种子
     if getattr(args, "seed", None) is not None:
         cfg.seed = args.seed
@@ -213,7 +402,7 @@ def cmd_train(args):
     # ---------- 3. 数据 ----------
     if not Path(config.TRAIN_CSV).exists():
         print(f"[错误] 找不到训练集索引 {config.TRAIN_CSV}")
-        print("       请先运行: python main.py build-data")
+        print("       请先检查数据集: python main.py check-data")
         return 1
 
     loaders = get_dataloaders(
@@ -350,7 +539,7 @@ def cmd_test(args):
 
     # ---------- 3. 测试集 DataLoader ----------
     if not Path(config.TEST_CSV).exists():
-        print(f"[错误] 找不到测试集索引 {config.TEST_CSV}，请先运行 build-data")
+        print(f"[错误] 找不到测试集 CSV {config.TEST_CSV}，请先运行 check-data")
         return 1
 
     param_min, param_max = compute_param_range(config.TRAIN_CSV)
@@ -366,11 +555,58 @@ def cmd_test(args):
     )
     print(f"\n测试集样本数: {len(test_ds)}")
 
-    # ---------- 4. 评估 ----------
-    metrics = evaluate(model, test_loader, device, threshold=cfg.eval_threshold)
-    print_metrics(metrics, f"测试集评估结果（阈值={cfg.eval_threshold}）- {tag}")
+    # ---------- 4. 确定分类阈值 ----------
+    # 两种来源：
+    #   (a) 默认：config.EVAL_THRESHOLD（固定 0.5）
+    #   (b) --val-threshold：在【验证集】上扫描并选最优阈值
+    #
+    # 为什么推荐 (b)：阈值是一个"被选出来的超参数"。如果直接拿测试集扫阈值
+    # 再挑最好的，等于用测试集答案挑一条最有利的分割线 —— 这是测试集泄漏，
+    # 会让报告指标虚高。实测该泄漏可达 0.04，比我们要验证的模型改进还大。
+    chosen_threshold = float(cfg.eval_threshold)
+    val_scan = None
+    use_val_threshold = bool(getattr(args, "val_threshold", False))
 
-    # ---------- 5. 画图 ----------
+    if use_val_threshold:
+        if not Path(config.VAL_CSV).exists():
+            print(f"[错误] --val-threshold 需要验证集 CSV，但找不到: {config.VAL_CSV}")
+            return 1
+        from src.train.evaluate import select_threshold
+
+        val_ds = SolarFlareDataset(
+            config.VAL_CSV,
+            img_size=cfg.img_size,
+            param_min=param_min,
+            param_max=param_max,
+            transform=build_transform("val", cfg.img_size),
+        )
+        val_loader = DataLoader(
+            val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers
+        )
+        print(f"\n验证集样本数: {len(val_ds):,}（仅用于选阈值）")
+
+        chosen_threshold, best_row, val_scan = select_threshold(
+            model, val_loader, device,
+            metric=(getattr(args, "threshold_metric", None) or "tss"),
+            thresholds=cfg.threshold_sweep,
+        )
+        del val_loader
+    else:
+        print(f"\n[提示] 当前用固定阈值 {chosen_threshold:.2f}。")
+        print("       若要避免测试集泄漏，建议加 --val-threshold（在验证集上选阈值）。")
+
+    # ---------- 5. 测试集评估（只评估一次，阈值已定死）----------
+    metrics = evaluate(model, test_loader, device, threshold=chosen_threshold)
+    source = "验证集选定" if use_val_threshold else "固定值"
+    print_metrics(
+        metrics,
+        f"测试集评估结果（阈值={chosen_threshold:.2f}，{source}）- {tag}",
+    )
+    if use_val_threshold:
+        print(f">>> 该阈值在验证集上选定后固定，测试集未参与任何阈值搜索（无泄漏）")
+    metrics["threshold_source"] = "val" if use_val_threshold else "fixed"
+
+    # ---------- 6. 画图 ----------
     try:
         plot_confusion_matrix(metrics["confusion"], tag=tag)
         plot_roc_curve(metrics["probs"], metrics["labels"], metrics["auc"], tag=tag)
@@ -380,8 +616,11 @@ def cmd_test(args):
 
     save_metrics_json(metrics, tag=tag)
 
-    # ---------- 6. 阈值扫描 ----------
+    # ---------- 7. 诊断用的测试集阈值扫描 ----------
     if args.sweep:
+        print()
+        print("[诊断] 以下扫描在【测试集】上进行，仅供观察趋势，")
+        print("       其中的'最优点'不能用于报告 —— 报告请用上面那个阈值。")
         sweep_thresholds(model, test_loader, device, thresholds=cfg.threshold_sweep)
 
     return 0
@@ -394,15 +633,26 @@ def cmd_test(args):
 
 def cmd_all(args):
     """
-    一条龙：build-data → train → test。
+    一条龙：check-data → train → test。
 
-    注意：正式训练很慢（全量 8000 条 × 50 epoch，Swin-Tiny 在 GPU 上也需要数小时），
-         建议先跑 `python main.py train --smoke` 确认流程通，再跑 all。
+    ⚠️ 耗时提醒（JW-FD 规模下）：
+        训练集 158,935 条、batch 32 → 一个 epoch 约 18 分钟（含验证集评估）。
+        默认 NUM_EPOCHS=12 / PATIENCE=5，因此：
+            最快：约 6 个 epoch 早停  → 约 1.8 小时
+            最慢：跑满 12 个 epoch    → 约 3.6 小时
+        之后还会自动跑一遍测试集评估（23,741 条，约 10 分钟）。
+
+        想先快速看个大概，可以加 --epochs 6。
+        建议先跑 `python main.py train --smoke` 确认流程通。
+
+    ⚠️ 产物命名：不传 --tag 时默认 tag='stcnet'，会覆盖旧的
+        experiments/checkpoints/stcnet_best.pth（SOLAR-STORM2 时代的模型）。
+        建议显式传 --tag jwfd 之类，把两代实验分开。
     """
     print("#" * 70)
-    print("# 步骤 1/3：构建数据索引")
+    print("# 步骤 1/3：校验数据集")
     print("#" * 70)
-    rc = cmd_build_data(args)
+    rc = cmd_validate_data(args)
     if rc != 0:
         return rc
 
@@ -438,10 +688,13 @@ def build_parser():
     # check
     sub.add_parser("check", help="检查环境与数据是否就绪")
 
-    # build-data
-    p_build = sub.add_parser("build-data", help="阶段一：构建索引 CSV")
-    p_build.add_argument("--no-downsample", action="store_true",
-                         help="不对负样本下采样（保留全部负样本）")
+    # check-data（替代原来的 build-data）
+    p_check_data = sub.add_parser(
+        "check-data",
+        help="校验 JW-FD 数据集：行数/列完整性/标签分布/图片存在性/活动区划分",
+    )
+    p_check_data.add_argument("--sample", type=int, default=200,
+                              help="抽查多少张图片验证存在性（默认 200）")
 
     # train
     p_train = sub.add_parser("train", help="阶段二：训练模型")
@@ -452,6 +705,10 @@ def build_parser():
     p_train.add_argument("--no-pretrain", action="store_true", help="不加载预训练权重（消融实验）")
     p_train.add_argument("--no-weighted-sampler", action="store_true", help="关闭加权采样")
     p_train.add_argument("--smoke", action="store_true", help="冒烟测试：小样本 1 个 epoch")
+    p_train.add_argument("--amp", action="store_true",
+                         help="启用混合精度训练（bf16，约 1.5× 加速、显存降约 1 GB）")
+    p_train.add_argument("--amp-dtype", type=str, default=None, choices=["bf16", "fp16"],
+                         help="混合精度类型，默认跟随 config.AMP_DTYPE（bf16）")
     # ★ 新增：随机种子，用于多种子重复实验
     p_train.add_argument("--seed", type=int, default=None,
                          help="随机种子。不填则用 config.RANDOM_SEED；"
@@ -461,24 +718,37 @@ def build_parser():
     p_test = sub.add_parser("test", help="阶段三：测试集评估")
     p_test.add_argument("--ckpt", type=str, default=None, help="权重文件路径")
     p_test.add_argument("--tag", type=str, default=None, help="实验标签")
-    p_test.add_argument("--sweep", action="store_true", help="额外做阈值扫描")
+    p_test.add_argument("--sweep", action="store_true", help="额外做阈值扫描（诊断用）")
+    p_test.add_argument("--val-threshold", action="store_true",
+                        help="★推荐：在验证集上选阈值，再用它评估测试集（避免测试集泄漏）")
+    p_test.add_argument("--threshold-metric", type=str, default=None,
+                        choices=["tss", "f1", "precision", "accuracy"],
+                        help="选阈值的判据，默认 tss")
     p_test.add_argument("--seed", type=int, default=None, help="随机种子（用于定位对应权重）")
 
     # all
-    p_all = sub.add_parser("all", help="一条龙：build-data → train → test")
+    p_all = sub.add_parser("all", help="一条龙：check-data → train → test")
     p_all.add_argument("--epochs", type=int, default=None, help="epoch 数")
     p_all.add_argument("--batch-size", type=int, default=None, help="batch 大小")
     p_all.add_argument("--tag", type=str, default=None, help="实验标签")
     # ★ 新增
     p_all.add_argument("--seed", type=int, default=None, help="随机种子")
 
-    p_all.add_argument("--no-downsample", action="store_true", help="不对负样本下采样")
+    p_all.add_argument("--no-downsample", action="store_true", help="（已弃用，JW-FD 不做下采样）")
     p_all.add_argument("--no-supcon", action="store_true", help="关闭对比学习")
     p_all.add_argument("--no-pretrain", action="store_true", help="不加载预训练权重")
     p_all.add_argument("--no-weighted-sampler", action="store_true", help="关闭加权采样")
     p_all.add_argument("--smoke", action="store_true", help="冒烟测试：小样本 1 个 epoch")
+    p_all.add_argument("--amp", action="store_true", help="启用混合精度（bf16，约 1.5×）")
+    p_all.add_argument("--amp-dtype", type=str, default=None, choices=["bf16", "fp16"],
+                       help="混合精度类型，默认 bf16")
     p_all.add_argument("--ckpt", type=str, default=None, help="（test 步骤用）权重路径")
-    p_all.add_argument("--sweep", action="store_true", help="（test 步骤用）阈值扫描")
+    p_all.add_argument("--sweep", action="store_true", help="（test 步骤用）阈值扫描（诊断用）")
+    p_all.add_argument("--val-threshold", action="store_true",
+                       help="（test 步骤用）★推荐：验证集选阈值，避免测试集泄漏")
+    p_all.add_argument("--threshold-metric", type=str, default=None,
+                       choices=["tss", "f1", "precision", "accuracy"],
+                       help="（test 步骤用）选阈值的判据，默认 tss")
 
     return parser
 
@@ -490,17 +760,13 @@ def main():
     # 分发到对应阶段
     if args.command == "check":
         return cmd_check(args)
-    if args.command == "build-data":
-        if args.no_downsample:
-            config.DOWNSAMPLE_NEGATIVE = False
-        return cmd_build_data(args)
+    if args.command == "check-data":
+        return cmd_validate_data(args)
     if args.command == "train":
         return cmd_train(args)
     if args.command == "test":
         return cmd_test(args)
     if args.command == "all":
-        if args.no_downsample:
-            config.DOWNSAMPLE_NEGATIVE = False
         return cmd_all(args)
 
     parser.print_help()

@@ -64,34 +64,45 @@ def main():
     print()
 
     # ---------- 2. 检查关键文件 ----------
-    print("[2] 检查关键文件")
+    print("[2] 检查关键文件（JW-FD + 预训练权重）")
     checks = [
-        ("SOLAR-STORM2 磁图目录", config.MAGNETOGRAM_DIR),
-        ("SOLAR-STORM2 参数表", config.PARA_FLARE_TXT),
+        ("JW-FD 根目录", config.JWFD_DIR),
+        ("PNG 磁图目录", config.JWFD_PNG_DIR),
+        ("训练集 CSV", config.TRAIN_CSV),
+        ("验证集 CSV", config.VAL_CSV),
+        ("测试集 CSV", config.TEST_CSV),
         ("Swin 预训练权重", config.SWIN_PRETRAINED),
-        ("CNN 预训练权重", config.CNN_PRETRAINED),
     ]
     all_ok = True
     for name, p in checks:
         ok = Path(p).exists()
         all_ok &= ok
-        print(f"    [{'OK ' if ok else '缺失'}] {name:24s} {p}")
+        print(f"    [{'OK ' if ok else '缺失'}] {name:16s} {p}")
     print()
 
     # ---------- 3. 提示下一步 ----------
     print("=" * 70)
     if all_ok:
         print("初始化完成。下一步：")
-        print("    python main.py build-data      # 构建索引 CSV")
+        print("    python main.py check           # 环境与模型自检")
+        print("    python main.py check-data      # 校验 JW-FD 数据集")
         print("    python main.py train --smoke   # 冒烟测试")
         print("    python main.py train           # 正式训练")
     else:
         print("初始化完成，但有关键文件缺失。")
-        print("请按上面的路径把 SOLAR-STORM2 数据集和预训练权重放到位。")
-        print("数据集下载：https://tianchi.aliyun.com/dataset/74780")
-        print("预训练权重：")
-        print("  https://github.com/SwinTransformer/storage/releases/download/v1.0.0/"
-              "swin_tiny_patch4_window7_224.pth")
+        print()
+        print("需要准备的两样东西：")
+        print("  1) JW-FD 数据集（v1 约 10% 子集）：")
+        print("       Zenodo : https://doi.org/10.5281/zenodo.21672850")
+        print("       解压后放到 data/raw/ ，应包含：")
+        print("         data/raw/png_600_Th1000/{活动区号}/AR*_*.png")
+        print("         data/raw/label/png/Th1000/solar_flare_dataset_png_*_{train,val,test}.csv")
+        print("         data/raw/flare_labels.csv")
+        print("       注意：三份 CSV 需要放到 data/index/ 下（或改 config 里的 INDEX_DIR）")
+        print("  2) Swin 预训练权重：")
+        print("       https://github.com/SwinTransformer/storage/releases/download/"
+              "v1.0.0/swin_tiny_patch4_window7_224.pth")
+        print("       放到 pretrained/ 下")
     print("=" * 70)
 
     return 0 if all_ok else 1
